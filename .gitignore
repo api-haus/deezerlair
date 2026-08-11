@@ -1,0 +1,14 @@
+# credentials
+.env
+state/
+
+# rebuildable
+cache/
+snapshots/
+
+__pycache__/
+*.pyc
+
+# The skill is part of what this repo ships, so it overrides a global ignore
+# of .claude/ if one is set.
+!.claude/

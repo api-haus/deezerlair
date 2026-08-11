@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dz import Deezer, cell
-from dz_find import resolve
+from dz_find import FLOOR, resolve
 from dz_gw import Gw, GwError, as_track
 
 # kind -> (add method, remove method, id parameter, search kind)
@@ -159,7 +159,7 @@ def main():
             sp.add_argument("--query", action="append", metavar="TEXT")
             sp.add_argument("--resolve", metavar="FILE",
                             help="free text, one query a line")
-            sp.add_argument("--min", type=float, default=0.6, dest="floor")
+            sp.add_argument("--min", type=float, default=FLOOR, dest="floor")
         if name == "rm":
             sp.add_argument("--yes", action="store_true")
     args = p.parse_args()

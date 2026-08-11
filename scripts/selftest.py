@@ -4,8 +4,9 @@
     python3 scripts/selftest.py
 
 Touches no network and no account, so it is safe to run at any time. It covers
-the pure logic: query folding, match confidence, the throttle classifier and
-its back-off, TSV projection, and which copy of a duplicate survives.
+the pure logic — query folding, match confidence, the throttle classifier and
+its back-off, TSV projection, which copy of a duplicate survives — and it
+holds `.agents/skills/` and `.claude/skills/` to being identical.
 """
 import sys
 import time
@@ -158,6 +159,35 @@ check("without an ISRC, artist and title are",
       ("song", "the beatles", "help"))
 check("the song key ignores the ISRC",
       song_key({"isrc": "AB", "artist": "A", "title": "B"}), ("song", "a", "b"))
+
+# -- the skills mirror -----------------------------------------------------
+# Claude Code loads .claude/skills/; anything else reads .agents/skills/. Both
+# must exist and must say the same thing, and a mirror kept by good intentions
+# stops being a mirror — so it is checked here.
+ROOT = Path(__file__).resolve().parent.parent
+CLAUDE_SKILLS, AGENT_SKILLS = ROOT / ".claude/skills", ROOT / ".agents/skills"
+SYNC = "rsync -a --delete .claude/skills/ .agents/skills/"
+
+
+def skill_tree(base):
+    if not base.is_dir():
+        return None
+    return {p.relative_to(base).as_posix(): p.read_bytes()
+            for p in sorted(base.rglob("*")) if p.is_file()}
+
+
+claude, agents = skill_tree(CLAUDE_SKILLS), skill_tree(AGENT_SKILLS)
+if claude is None or agents is None:
+    FAILED.append(f"a skills directory is missing — run: {SYNC}")
+else:
+    for name in sorted(set(claude) | set(agents)):
+        if name not in agents:
+            FAILED.append(f"{name} is only in .claude/skills — run: {SYNC}")
+        elif name not in claude:
+            FAILED.append(f"{name} is only in .agents/skills — run: {SYNC}")
+        elif claude[name] != agents[name]:
+            FAILED.append(f"{name} differs between the two — run: {SYNC}")
+    check_true("there are skills to mirror", claude)
 
 if FAILED:
     print(f"{len(FAILED)} checks failed:")

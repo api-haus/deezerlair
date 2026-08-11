@@ -13,9 +13,10 @@ Usage:
 Query text is split on " - ", " – " or " by " into artist and title, and sent
 as a fielded search. The fallback is a plain search over the whole string.
 
-Every candidate gets a confidence between 0 and 1. Below 0.6 the match is a
-guess: show it to the user instead of writing it into a playlist. Tracks that
-this account cannot play (`readable` false) are dropped unless you pass --any.
+Every candidate gets a confidence between 0 and 1. Below the floor (FLOOR
+below, 0.6 as shipped) the match is a guess: show it to the user instead of
+writing it into a playlist. Tracks this account cannot play are dropped
+unless you pass --any.
 """
 import argparse
 import re
@@ -26,6 +27,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dz import Deezer, DeezerError, cell
+
+# How sure a match must be before a script will write it into the library.
+# This is a preference, not a constant of nature: `PREFS.md` states it in
+# prose and this is what enforces it, so the two move together. Every --min
+# default in this repo reads from here.
+FLOOR = 0.6
 
 SPLIT = re.compile(r"\s+[-–—]\s+|\s+by\s+", re.I)
 ISRC = re.compile(r"^[A-Za-z]{2}[A-Za-z0-9]{3}\d{7}$")
@@ -187,8 +194,8 @@ def main():
     p.add_argument("--any", action="store_true",
                    help="keep tracks this account cannot play")
     p.add_argument("--batch", metavar="FILE", help="one query per line, - for stdin")
-    p.add_argument("--min", type=float, default=0.6, dest="floor",
-                   help="confidence floor for --batch (default 0.6)")
+    p.add_argument("--min", type=float, default=FLOOR, dest="floor",
+                   help=f"confidence floor for --batch (default {FLOOR})")
     args = p.parse_args()
 
     client = Deezer()
@@ -214,7 +221,7 @@ def main():
         print(rows[0]["id"])
         return 0
     emit(rows[:args.limit] if args.list else rows[:1], args.kind)
-    if not args.list and rows[0]["confidence"] < 0.6:
+    if not args.list and rows[0]["confidence"] < FLOOR:
         print(f"low confidence ({rows[0]['confidence']}) — run with --list "
               f"and confirm before writing this anywhere", file=sys.stderr)
     return 0

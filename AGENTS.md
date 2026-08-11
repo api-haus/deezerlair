@@ -1,8 +1,11 @@
 # deezerlair — agent operating guide
 
+This is the tool-neutral source of truth for AI agents in this repo. Every
+agent reads it, either directly or through a one-line adapter file:
+`CLAUDE.md` imports it and adds nothing but Claude-specific notes.
+
 Tools to manage one Deezer account from a terminal: playlists, favourites,
-search and discovery. Everything is plain Python 3 with no dependencies, and
-every script calls the official Deezer API through `scripts/dz.py`.
+search and discovery. Everything is plain Python 3 with no dependencies.
 
 The owner listens and downloads in the Deezer desktop application. This repo
 never touches audio. It manages the *library* — what is in it, how it is
@@ -20,6 +23,26 @@ settings. If `PREFS.md` is missing, copy `PREFS.example.md` to it first.
 Write to `PREFS.md` only on an explicit instruction. It is not a place to
 record what the user listens to or to log inferences about their taste.
 
+If there is no `PREFS.md` — or it is still a verbatim copy of
+`PREFS.example.md`, which means nobody has answered anything — mention
+`/hello-deezer` once, lightly, at a natural pause, and never as a gate on the
+thing they asked for. *"You have no PREFS.md yet; `/hello-deezer` sets how
+much to ask before adding, and which recording wins, in about a minute."* If
+they opened the session asking to fix a playlist, fix the playlist first and
+mention it after. Do not ask the preference questions inline instead: that is
+what the skill is for, and asked ad hoc they end up answered but unrecorded.
+
+## Provider-neutral by default
+
+- Durable guidance goes in this file, not in a provider's own.
+- Skills live in `.agents/skills/` and `.claude/skills/` as byte-identical
+  copies — Claude Code loads only the second, other agents have no reason to
+  look there. Edit either, then sync and check:
+  `rsync -a --delete .claude/skills/ .agents/skills/` followed by
+  `python3 scripts/selftest.py`, which fails when the two drift apart.
+- Keep provider-specific notes to the adapter file (`CLAUDE.md`) and personal
+  settings out of git entirely.
+
 ## Two APIs, and which one to use
 
 Deezer has a public API and a private one, and this repo uses both.
@@ -35,6 +58,23 @@ Deezer has a public API and a private one, and this repo uses both.
 
 Ids are the same in both, so a track found through search can be written
 through the gateway without translation.
+
+## First run — setting this up
+
+Someone opening a session here with nothing configured is a normal request,
+not a special occasion. Work through this and ask only for what you cannot
+know:
+
+1. `python3 scripts/dz_login.py --check` — if it names an account, skip to 3.
+2. Run `/deezer-login`. It usually needs nothing but the user being signed in
+   to the Deezer desktop player.
+3. `cp PREFS.example.md PREFS.md` then run `/hello-deezer`, which turns four
+   questions into that file.
+4. `python3 scripts/dz_pull.py --snapshot` — fills the cache and writes the
+   first restore point.
+5. `python3 scripts/dz_audit.py` — tells them what is wrong with the library.
+
+Then ask what they want to do with it.
 
 ## Start of a session
 
@@ -274,7 +314,9 @@ disagrees with what you observe, believe what you observe and fix this file.
 - `scripts/` — everything above, stdlib only, no install step
 - `PREFS.md` — the user's taste, gitignored, wins over this file
 - `PREFS.example.md` — the tracked template it is copied from
-- `.claude/skills/deezer-login/` — connecting the account
+- `CLAUDE.md` — the Claude adapter; imports this file, adds nothing else
+- `.agents/skills/`, `.claude/skills/` — `deezer-login` and `hello-deezer`,
+  kept identical in both
 - `state/session.json` — the `arl` (mode 600, ignored by git)
 - `cache/library.json` — the last pull, safe to delete and rebuild
 - `snapshots/` — restore points, the undo for everything destructive

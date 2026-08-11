@@ -35,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dz import Deezer, cell
-from dz_find import norm, resolve
+from dz_find import FLOOR, norm, resolve
 from dz_gw import (STATUS_PRIVATE, STATUS_PUBLIC, Gw, GwError, as_playlist,
                    as_track, songs_payload)
 
@@ -411,8 +411,8 @@ def main():
         sp.add_argument("--resolve", metavar="FILE",
                         help="free text, one query a line")
         sp.add_argument("--query", action="append", metavar="TEXT")
-        sp.add_argument("--min", type=float, default=0.6, dest="floor",
-                        help="confidence floor when resolving (default 0.6)")
+        sp.add_argument("--min", type=float, default=FLOOR, dest="floor",
+                        help=f"confidence floor when resolving (default {FLOOR})")
 
     sub.add_parser("list")
     for name in ("show", "export"):

@@ -18,15 +18,39 @@ It does not download anything. It manages the library only: what is in it,
 what it is called, and how it is arranged. Play and download in the Deezer
 application.
 
-## Setup
+## Getting started
+
+You need Python 3, a Deezer account, and the Deezer desktop player signed in
+(or deezer.com signed in, in a browser).
+
+Then clone this, open your favourite LLM client in the directory, and say:
+
+> set this up
+
+That is the install. It reads `AGENTS.md`, finds your session, pulls your
+library and tells you what is wrong with it.
+
+Then it runs `/hello-deezer`, a short conversation about how you want the
+library handled: whether to add first or ask first, which recording wins when
+several match, what to do about tracks with no lossless version, how new
+playlists should be created. Your answers become `PREFS.md`, which is yours
+and stays out of git.
+
+After that, ask it to clean something up.
+
+If you would rather drive, every step is written out in
+[AGENTS.md](AGENTS.md) — the agent is following that file, not doing anything
+you cannot do yourself:
 
 ```bash
 git clone https://github.com/api-haus/deezerlair && cd deezerlair
 cp PREFS.example.md PREFS.md      # your taste; gitignored, edit freely
 python3 scripts/dz_login.py
+python3 scripts/dz_pull.py --snapshot
+python3 scripts/dz_audit.py
 ```
 
-That is the whole setup, and usually there is nothing to paste.
+Usually there is nothing to paste.
 
 **There is no API key, because you cannot get one.** Deezer has closed new
 API application registration — <https://developers.deezer.com/myapps> answers
@@ -123,13 +147,16 @@ change your mind:
 - *"stop asking before you favourite something I just said I liked"*
 - *"new playlists are private, and no emoji in the names"*
 
-`CONTEXT.md` fixes the vocabulary, so "track", "song" and "loose duplicate"
-mean one thing each. All of it is written for
-[Claude Code](https://claude.com/claude-code), but any agent that reads a
-repository gets the same value from it.
+`CONTEXT.md` fixes the vocabulary, so "track", "song" and "duplicate" mean one
+thing each.
 
-`.claude/skills/deezer-login/` adds a `/deezer-login` command that walks a
-user through the browser flow.
+None of that is tied to one vendor. `AGENTS.md` is the tool-neutral source of
+truth and `CLAUDE.md` is a one-line adapter that imports it, so
+[Claude Code](https://claude.com/claude-code), Codex, or anything else that
+reads a repository gets the same instructions. Skills live in
+`.agents/skills/` and `.claude/skills/` as identical copies — Claude Code
+loads only the second — and `scripts/selftest.py` fails if the two drift
+apart. Two ship today: `/deezer-login` and `/hello-deezer`.
 
 ## Safety
 

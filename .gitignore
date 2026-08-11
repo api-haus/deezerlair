@@ -1,5 +1,4 @@
-# credentials
-.env
+# credentials — the arl is the whole account
 state/
 
 # Your preferences — which recording wins, how much to ask, playlist taste.

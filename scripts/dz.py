@@ -1,23 +1,35 @@
 #!/usr/bin/env python3
-"""Raw Deezer API access. Every other script in this repo calls through here.
+"""Raw Deezer API access — the public half, plus a door to the private half.
+
+Deezer has two APIs, and this repo uses both:
+
+    api.deezer.com    public, no session, clean JSON. Search, catalogue,
+                      charts, editorial, an artist's related artists. This
+                      script speaks it.
+    gw-light          the gateway the website itself uses, authenticated by
+                      the `arl` cookie. Everything about *your* account and
+                      every write lives here. `dz_gw.py` speaks it, and
+                      `--gw` below reaches it from the command line.
 
 Usage:
-    dz.py <path> [key=value ...]                  GET a resource
-    dz.py -X POST <path> [key=value ...]          create / add
-    dz.py -X DELETE <path> [key=value ...]        remove
+    dz.py <path> [key=value ...]                  GET a public resource
     dz.py --all <path> [key=value ...]            follow `next`, merge `data`
     dz.py --fields id,title,artist.name <path>    TSV instead of JSON
+    dz.py --gw <method> [key=value ...]           call a gateway method
 
 Examples:
-    dz.py user/me
-    dz.py --all user/me/playlists --fields id,title,nb_tracks
     dz.py search q='artist:"boards of canada" track:"roygbiv"' limit=3
-    dz.py -X POST user/me/tracks track_id=3135556
-    dz.py -X POST playlist/1234/tracks songs=3135556,916424
-    dz.py -X DELETE playlist/1234/tracks songs=3135556
+    dz.py --all album/302127/tracks --fields id,title
+    dz.py artist/27/related --fields id,name
+    dz.py chart/0/tracks limit=20 --fields title,artist.name
+    dz.py --gw deezer.getUserData
+    dz.py --gw playlist.getSongs PLAYLIST_ID=1234 nb=10 start=0
+    dz.py --gw deezer.pageProfile USER_ID=123 tab=playlists nb=5
 
-The access token comes from $DEEZER_ACCESS_TOKEN, then from state/token.json.
-Search, album, artist, chart and the other public resources need no token.
+Gateway values are read as JSON when they parse as JSON, so numbers arrive as
+numbers and `songs=[[3135556,0]]` arrives as a list. Everything else is a
+string. `-X POST`/`-X DELETE` still work against the public API, but its write
+endpoints need an OAuth token that Deezer no longer issues — use `--gw`.
 """
 import json
 import os
@@ -31,8 +43,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 BASE = "https://api.deezer.com"
-CONNECT = "https://connect.deezer.com"
-TOKEN_FILE = ROOT / "state" / "token.json"
 UA = "deezerlair/0.1 (+https://github.com/api-haus/deezerlair)"
 
 # Deezer permits 50 calls per 5 seconds per application. Stay below it, and
@@ -40,11 +50,6 @@ UA = "deezerlair/0.1 (+https://github.com/api-haus/deezerlair)"
 WINDOW = 5.0
 BURST = 40
 RETRIES = 4
-
-# Every permission the developer portal grants. Read-only sessions need only
-# basic_access; the housekeeping scripts need manage_library + delete_library.
-PERMS = ("basic_access,email,offline_access,manage_library,"
-         "manage_community,delete_library,listening_history")
 
 
 class DeezerError(RuntimeError):
@@ -72,29 +77,14 @@ def load_env(path=None):
 
 
 def load_token():
-    """Return the stored access token, or None when nobody logged in yet."""
-    env = load_env()
-    if env.get("DEEZER_ACCESS_TOKEN"):
-        return env["DEEZER_ACCESS_TOKEN"]
-    if TOKEN_FILE.exists():
-        try:
-            return json.loads(TOKEN_FILE.read_text()).get("access_token")
-        except (ValueError, OSError):
-            return None
-    return None
+    """An OAuth token, if one was supplied.
 
-
-def save_token(token, profile=None, perms=None):
-    """Write the token to state/token.json, readable only by the owner."""
-    TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    body = {"access_token": token,
-            "obtained": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "user_id": (profile or {}).get("id"),
-            "user_name": (profile or {}).get("name"),
-            "permissions": perms or {}}
-    TOKEN_FILE.write_text(json.dumps(body, indent=2) + "\n")
-    TOKEN_FILE.chmod(0o600)
-    return TOKEN_FILE
+    Deezer stopped issuing API applications, so nobody can obtain one of these
+    any more. It stays supported for whoever registered an application back
+    when that was possible; everything else in this repo authenticates through
+    `dz_gw.py` instead. Nothing here needs a token to read the catalogue.
+    """
+    return load_env().get("DEEZER_ACCESS_TOKEN") or None
 
 
 class Deezer:
@@ -214,11 +204,15 @@ class Deezer:
             index = step
 
     def me(self):
-        """The logged-in profile. Raises when no token is stored."""
+        """The profile behind an OAuth token, for the rare caller that has one.
+
+        Ask `dz_gw.Gw` who the user is instead — that path works without an
+        API application, which nobody can register any more.
+        """
         if not self.token:
             raise DeezerError(
-                "no access token — run: /deezer-login "
-                "(or python3 scripts/dz_login.py --url)")
+                "the public API cannot see an account without an OAuth token; "
+                "use dz_gw.Gw() — run the /deezer-login skill to connect")
         return self.get("user/me")
 
 
@@ -262,6 +256,7 @@ def as_tsv(body, fields, header=True):
 def main(argv):
     args, params, method, follow = [], {}, "GET", False
     fields, compact, verbose, token, cap = None, False, False, None, None
+    gateway = False
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -270,6 +265,8 @@ def main(argv):
             method = argv[i].upper()
         elif a == "--all":
             follow = True
+        elif a == "--gw":
+            gateway = True
         elif a == "--max":
             i += 1
             cap = int(argv[i])
@@ -296,16 +293,32 @@ def main(argv):
         print(__doc__, file=sys.stderr)
         return 2
 
-    client = Deezer(token=token, verbose=verbose)
-    try:
-        if follow:
-            body = client.paginate(args[0], max_items=cap, **params)
-        else:
-            body = client.request(args[0], method, **params)
-    except DeezerError as e:
-        code = f" (code {e.code})" if e.code is not None else ""
-        print(f"deezer: {e}{code}", file=sys.stderr)
-        return 1
+    if gateway:
+        from dz_gw import Gw, GwError          # only this path needs a session
+        payload = {}
+        for k, v in params.items():
+            try:
+                payload[k] = json.loads(v)
+            except ValueError:
+                payload[k] = v
+        try:
+            gw = Gw(verbose=verbose)
+            body = (gw.paginate(args[0], cap=cap, **payload) if follow
+                    else gw.call(args[0], **payload))
+        except GwError as e:
+            print(f"deezer: {e}", file=sys.stderr)
+            return 1
+    else:
+        client = Deezer(token=token, verbose=verbose)
+        try:
+            if follow:
+                body = client.paginate(args[0], max_items=cap, **params)
+            else:
+                body = client.request(args[0], method, **params)
+        except DeezerError as e:
+            code = f" (code {e.code})" if e.code is not None else ""
+            print(f"deezer: {e}{code}", file=sys.stderr)
+            return 1
 
     if fields:
         print(as_tsv(body, fields))

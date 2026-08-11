@@ -59,16 +59,25 @@ reverse: **report them, do not remove them.** I want to see what fell out of
 the catalogue before it goes, because sometimes a re-add finds it under a new
 id.
 
+## Audio quality
+
+Lossless is why I am on Deezer. Where two copies of one recording exist and
+only one has a FLAC, keep that one — `dz_playlist.py dedupe` already prefers
+it. Tell me when something I asked for has no lossless version, but add it
+anyway; a lossy copy beats no copy.
+
 ## Playlists
 
-New playlists are private until I say otherwise.
+New playlists are private until I say otherwise. That is the default of
+`dz_playlist.py create`; `--public` is the opt-in.
 
 Titles: plain words, no emoji, no ALL CAPS, no "(2)" suffixes. If a transfer
 left a name like "Liked from Spotify", rename it to what the list actually is.
 
-Dedupe exact duplicates without asking once I have agreed to the cleanup.
-Loose duplicates — the same song under two ids — need the plan shown first,
-because picking which copy survives is a judgement call.
+Collapse same-recording duplicates — the ones that share an ISRC — without
+asking, once I have agreed to clean a playlist. Same-song duplicates matched
+only on artist and title need the plan shown first, because some of them are
+covers or re-recordings I meant to keep.
 
 I would rather have fewer, larger, well-named playlists than many small ones.
 When something is under about five tracks, it wants merging somewhere.

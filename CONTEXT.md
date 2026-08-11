@@ -15,11 +15,15 @@ title, folded to lowercase with the punctuation and the decoration removed
 licensing gap in this country. Those tracks stay in a playlist forever and
 never play, and a transfer from another service brings many of them.
 
-**exact duplicate** — one track id present twice in one playlist.
+**duplicate** — two different track ids in one playlist for what a listener
+hears as one song. Deezer refuses to hold one id twice, so there is no other
+kind. A **same-recording duplicate** shares an ISRC and is safe to collapse; a
+**same-song duplicate** matches only on artist and title, and may turn out to
+be a cover or a re-recording. This is what a playlist transfer produces.
 
-**loose duplicate** — two track ids in one playlist that are the same song.
-This is what a playlist transfer produces, and what a title comparison alone
-would miss.
+**lossless** — a FLAC exists for this track. The gateway reports it as a
+non-zero `FILESIZE_FLAC`. A track can be perfectly playable and still have no
+lossless version.
 
 **own playlist** — created by this account, and writable. **followed
 playlist** — created by somebody else and saved to this account. Both appear
@@ -48,5 +52,10 @@ It is taste, it is personal to one user, and it overrides `AGENTS.md`, which
 is shared doctrine. A preference is written down only when the owner asks for
 it, never inferred.
 
-**quota** — 50 API calls per 5 seconds, per application. `dz.py` paces itself
-below it and retries when Deezer says no.
+**arl** — the cookie that is the whole Deezer session. It plays, downloads and
+edits the library, so it is a password, not a token. It comes from the desktop
+player's cookie store, and lives in `state/session.json`.
+
+**gateway** — `gw-light`, the private API the Deezer website talks to. It
+answers in SHOUTING_KEYS and is reached through `dz_gw.py`. The **public API**
+is `api.deezer.com`: no session, clean JSON, catalogue only.

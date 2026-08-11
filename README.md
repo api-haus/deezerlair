@@ -22,32 +22,38 @@ application.
 
 ```bash
 git clone https://github.com/api-haus/deezerlair && cd deezerlair
-cp .env.example .env && chmod 600 .env
 cp PREFS.example.md PREFS.md      # your taste; gitignored, edit freely
+python3 scripts/dz_login.py
 ```
 
-Register an application at <https://developers.deezer.com/myapps>:
+That is the whole setup, and usually there is nothing to paste.
 
-- Application domain: `localhost`
-- Redirect URL after authentication: `http://localhost:8080/deezerlair`
+**There is no API key, because you cannot get one.** Deezer has closed new
+API application registration — <https://developers.deezer.com/myapps> answers
+*"We're not accepting new application creation at this time"* — so the OAuth
+flow in the official documentation cannot be started by anybody who does not
+already own an application. Every write endpoint of the public API is behind
+it, which makes that API read-only for new projects, permanently as far as
+anyone outside Deezer can tell.
 
-Put the Application ID and the Secret Key in `.env`, then log in:
+So this repo authenticates the way the Deezer website and desktop player do:
+with a session cookie called `arl`. The desktop player stores its cookies
+unencrypted, so **signing in to the player is the login** — `dz_login.py`
+finds the cookie, checks it, and stores it in `state/session.json` (mode 600,
+git-ignored). Firefox works the same way. For a Chromium-family browser, which
+encrypts its cookie store, copy the value by hand:
 
-```bash
-python3 scripts/dz_login.py --serve      # opens a browser, catches the redirect
+```
+deezer.com, signed in -> F12 -> Application -> Cookies -> arl -> copy
+python3 scripts/dz_login.py --arl '<paste>'
 ```
 
-If you are working over SSH, or through an agent, use the two-step form
-instead — `--url` prints the login link, and `--code` takes back the address
-the browser landed on:
+**Treat the `arl` as your password.** It plays, downloads and edits the
+library. Do not paste it into a chat, a commit or an issue. If it leaks, sign
+out of Deezer everywhere to rotate it.
 
-```bash
-python3 scripts/dz_login.py --url
-python3 scripts/dz_login.py --code 'http://localhost:8080/deezerlair?code=...'
-```
-
-The token is stored in `state/token.json`, mode 600, ignored by git. Deezer
-issues it with `offline_access`, so it does not expire on a timer.
+Reads of the catalogue — search, charts, an artist's related artists — go to
+the public API and need no session at all.
 
 ## Use
 
@@ -67,14 +73,16 @@ python3 scripts/dz_fav.py list artists
 
 # playlists
 python3 scripts/dz_playlist.py list
-python3 scripts/dz_playlist.py create "Late Drive" --private
+python3 scripts/dz_playlist.py create "Late Drive"          # private by default
 python3 scripts/dz_playlist.py add <id> --resolve tracklist.txt
-python3 scripts/dz_playlist.py dedupe <id> --loose --apply
+python3 scripts/dz_playlist.py dedupe <id> --apply           # same ISRC
+python3 scripts/dz_playlist.py dedupe <id> --loose --apply   # same artist+title
+python3 scripts/dz_playlist.py sort <id> --by artist --apply
 python3 scripts/dz_playlist.py merge <old> --into <new> --apply --drop-sources
 
-# anything else the API can do
+# anything else either API can do
 python3 scripts/dz.py artist/27/related --fields id,name
-python3 scripts/dz.py -X POST playlist/<id>/tracks songs=3135556,916424
+python3 scripts/dz.py --gw playlist.getSongs PLAYLIST_ID=<id> nb=10 start=0
 ```
 
 Everything that changes the account prints a plan and stops. Add `--apply`
@@ -131,16 +139,26 @@ user through the browser flow.
 
 ## Notes on the API
 
-Collected while building this, and expanded in `AGENTS.md`:
+Verified against a live account while building this, and expanded in
+`AGENTS.md`. The gateway has no official documentation, so this is the part
+worth keeping:
 
-- A failed call returns HTTP 200 with an `error` object in the body.
-- The quota is 50 calls per 5 seconds per application.
-- Deleting a track from a playlist deletes every copy — the API addresses
-  tracks by id, not by position.
-- `readable: false` marks a track this account can never play.
-- One redirect URL per application, and it cannot be changed after the fact.
-- Write parameters go in the query string, including for POST and DELETE.
+- New API application registration is closed, which makes the public API
+  read-only for new projects. The gateway (`gw-light`) is the way in.
+- A failed call still returns HTTP 200; the error is in the body.
+- Playlist `STATUS` is **0 for public and 1 for private** — the opposite way
+  round from what the name suggests. Getting this backwards publishes every
+  playlist you create.
+- Deezer refuses to hold the same track id twice in one playlist, so every
+  duplicate is two different ids for one recording. Match them on ISRC, which
+  gateway rows carry.
+- `FILESIZE` of 0 means the track is unplayable for this account;
+  `FILESIZE_FLAC` of 0 means there is no lossless version of it.
+- `VERSION` holds "(Live)", "(Remastered)" and so on, separately from the
+  title — so a title alone cannot tell you which recording you have.
+- Gateway payloads are JSON in the POST body, so nothing is capped by URL
+  length: a playlist of any size reorders in a single call.
 
 ## Licence
 
-MIT.
+MIT — see [LICENSE.md](LICENSE.md).

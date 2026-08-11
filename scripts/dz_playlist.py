@@ -3,7 +3,7 @@
 
     dz_playlist.py list                          every playlist, as TSV
     dz_playlist.py show 12345                    its tracks, as TSV
-    dz_playlist.py create "Title" [--private] [--description TEXT]
+    dz_playlist.py create "Title" [--public] [--description TEXT]
     dz_playlist.py add 12345 3135556 916424      by track id
     dz_playlist.py add 12345 --query "Air - La Femme d'Argent"
     dz_playlist.py add 12345 --resolve list.txt  one "Artist - Title" a line
@@ -22,41 +22,59 @@ Anything that changes the account prints a plan and stops. Pass --apply (or
 
     python3 scripts/dz_pull.py --snapshot
 
-Deezer removes *every* copy of a track id when you delete it from a playlist,
-so `dedupe` deletes the id and adds it back once — the surviving copy moves to
-the end of the playlist. Loose duplicates are different ids, so they just go.
+Deezer refuses to hold the same track id twice in one playlist, so a duplicate
+is always two *different* ids for one recording. `dedupe` matches them on ISRC
+by default, which is the same recording beyond doubt; `--loose` also matches
+on artist and title, which catches re-recordings and needs your eye. Of each
+group it keeps the playable, lossless copy, and the earliest one on a tie.
 """
 import argparse
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dz import Deezer, DeezerError, cell
+from dz import Deezer, cell
 from dz_find import norm, resolve
-
-CHUNK = 50          # track ids per write call, to keep the URL sane
-ORDER_MAX = 400     # a longer order= list overflows the request line
-
-
-def chunked(items, size=CHUNK):
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
+from dz_gw import (STATUS_PRIVATE, STATUS_PUBLIC, Gw, GwError, as_playlist,
+                   as_track, songs_payload)
 
 
-def playlist(client, pid):
-    return client.get(f"playlist/{pid}")
+def head(gw, pid):
+    """Metadata for one playlist: title, description, status, owner."""
+    data = (gw.call("deezer.pagePlaylist", playlist_id=int(pid), lang="en",
+                    nb=1, start=0, tags=True, header=True) or {}).get("DATA")
+    if not data:
+        raise GwError(f"playlist {pid} not found")
+    return data
 
 
-def tracks(client, pid):
-    return client.paginate(f"playlist/{pid}/tracks")
+def tracks(gw, pid):
+    return [as_track(r) for r in gw.paginate("playlist.getSongs",
+                                             PLAYLIST_ID=int(pid))]
+
+
+def owned(gw, pid, action):
+    """Refuse to write to a playlist this account does not own."""
+    data = head(gw, pid)
+    if str(data.get("PARENT_USER_ID")) != str(gw.user_id):
+        sys.exit(f"playlist {pid} ({data.get('TITLE')}) belongs to user "
+                 f"{data.get('PARENT_USER_ID')}, not to you — refusing to "
+                 f"{action} it")
+    return data
 
 
 def key(track):
-    """The identity of a song across releases: artist plus title, folded."""
-    return norm((track.get("artist") or {}).get("name")), norm(track.get("title"))
+    """The identity of a song: its ISRC, else artist plus title, folded."""
+    if track.get("isrc"):
+        return ("isrc", track["isrc"])
+    return ("song", norm(track.get("artist")), norm(track.get("title")))
 
 
-def collect(client, args):
+def song_key(track):
+    return "song", norm(track.get("artist")), norm(track.get("title"))
+
+
+def collect(gw, args):
     """Every track id the caller asked for, from ids, files and queries."""
     ids = []
     for raw in args.ids:
@@ -69,254 +87,253 @@ def collect(client, args):
             line = line.strip()
             if line and not line.startswith("#"):
                 ids.append(line.split("\t")[0])
-    for query in args.query or []:
-        row = resolve(client, query)
+    queries = list(args.query or [])
+    if args.resolve:
+        text = (sys.stdin.read() if args.resolve == "-"
+                else Path(args.resolve).read_text())
+        queries += [l.strip() for l in text.splitlines()
+                    if l.strip() and not l.startswith("#")]
+    misses = []
+    catalogue = Deezer() if queries else None    # search needs no session
+    for query in queries:
+        row = resolve(catalogue, query)
         if not row or row["confidence"] < args.floor:
-            print(f"unresolved: {query!r} "
-                  f"({row['confidence'] if row else 0})", file=sys.stderr)
+            misses.append(query)
             continue
         print(f"{query!r} -> {row['id']} {row.get('title')} — "
               f"{(row.get('artist') or {}).get('name')}", file=sys.stderr)
         ids.append(str(row["id"]))
-    if args.resolve:
-        lines = (sys.stdin.read() if args.resolve == "-"
-                 else Path(args.resolve).read_text()).splitlines()
-        misses = []
-        for line in lines:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            row = resolve(client, line)
-            if not row or row["confidence"] < args.floor:
-                misses.append(line)
-                continue
-            ids.append(str(row["id"]))
-        if misses:
-            print(f"{len(misses)} lines did not resolve:", file=sys.stderr)
-            for line in misses:
-                print(f"  {line}", file=sys.stderr)
+    if misses:
+        print(f"{len(misses)} queries did not resolve above {args.floor}:",
+              file=sys.stderr)
+        for query in misses:
+            print(f"  {query}", file=sys.stderr)
     seen, out = set(), []
     for i in ids:
-        if i.isdigit() and i not in seen:
+        if str(i).isdigit() and i not in seen:
             seen.add(i)
-            out.append(i)
+            out.append(int(i))
     return out
 
 
 # -- read ------------------------------------------------------------------
 
-def cmd_list(client, args):
-    rows = client.paginate("user/me/playlists")
-    me = client.me().get("id")
-    print("#id\ttitle\tnb_tracks\tmine\tpublic\tloved\tcreator")
-    for r in rows:
-        creator = (r.get("creator") or {})
+def cmd_list(gw, args):
+    rows = [as_playlist(r, gw.user_id) for r in gw.profile_tab("playlists")]
+    rows.sort(key=lambda p: (not p["mine"], -(p["nb_tracks"] or 0)))
+    print("#id\ttitle\tnb_tracks\tmine\tpublic\tloved")
+    for p in rows:
         print("\t".join(cell(v) for v in (
-            r.get("id"), r.get("title"), r.get("nb_tracks"),
-            creator.get("id") == me, r.get("public"),
-            r.get("is_loved_track", False), creator.get("name"))))
+            p["id"], p["title"], p["nb_tracks"], p["mine"], p["public"],
+            p["is_loved_track"])))
     return 0
 
 
-def cmd_show(client, args):
-    rows = tracks(client, args.playlist)
-    print("#id\ttitle\tartist\talbum\tduration\treadable")
+def cmd_show(gw, args):
+    rows = tracks(gw, args.playlist)
+    print("#id\ttitle\tartist\talbum\tduration\treadable\tlossless\tisrc")
     for t in rows:
         print("\t".join(cell(v) for v in (
-            t.get("id"), t.get("title"), (t.get("artist") or {}).get("name"),
-            (t.get("album") or {}).get("title"), t.get("duration"),
-            t.get("readable", True))))
+            t["id"], t["title"], t["artist"], t["album"], t["duration"],
+            t["readable"], t["lossless"], t["isrc"])))
     return 0
 
 
-def cmd_export(client, args):
-    for t in tracks(client, args.playlist):
-        print(f"{(t.get('artist') or {}).get('name')} - {t.get('title')}")
+def cmd_export(gw, args):
+    for t in tracks(gw, args.playlist):
+        print(f"{t['artist']} - {t['title']}")
     return 0
 
 
 # -- write -----------------------------------------------------------------
 
-def cmd_create(client, args):
-    made = client.post("user/me/playlists", title=args.title)
-    pid = made.get("id") if isinstance(made, dict) else made
-    fields = {}
-    if args.description:
-        fields["description"] = args.description
-    if args.private:
-        fields["public"] = "false"
-    if fields:
-        client.post(f"playlist/{pid}", **fields)
-    print(f"created playlist {pid}: {args.title}")
+def cmd_create(gw, args):
+    status = STATUS_PUBLIC if args.public else STATUS_PRIVATE
+    pid = gw.call("playlist.create", title=args.title, status=status,
+                  description=args.description or "", songs=[])
+    print(f"created playlist {pid}: {args.title} "
+          f"({'public' if args.public else 'private'})")
     return 0
 
 
-def cmd_add(client, args):
-    ids = collect(client, args)
+def cmd_add(gw, args):
+    ids = collect(gw, args)
     if not ids:
         print("nothing to add", file=sys.stderr)
         return 1
-    head = playlist(client, args.playlist)
-    existing = {str(t["id"]) for t in tracks(client, args.playlist)}
+    data = owned(gw, args.playlist, "add to")
+    existing = {t["id"] for t in tracks(gw, args.playlist)}
     fresh = [i for i in ids if i not in existing]
-    dupes = len(ids) - len(fresh)
-    if dupes:
-        print(f"{dupes} already in the playlist, skipping them",
+    if len(ids) - len(fresh):
+        print(f"{len(ids) - len(fresh)} already in the playlist, skipping",
               file=sys.stderr)
     if not fresh:
         print("every track is already there")
         return 0
-    for part in chunked(fresh):
-        client.post(f"playlist/{args.playlist}/tracks", songs=",".join(part))
-    print(f"added {len(fresh)} tracks to {args.playlist} ({head.get('title')})")
+    gw.call("playlist.addSongs", PLAYLIST_ID=int(args.playlist),
+            songs=songs_payload(fresh), offset=-1)
+    print(f"added {len(fresh)} tracks to {args.playlist} ({data.get('TITLE')})")
     return 0
 
 
-def cmd_rm(client, args):
-    ids = collect(client, args)
+def cmd_rm(gw, args):
+    ids = collect(gw, args)
     if not ids:
         print("nothing to remove", file=sys.stderr)
         return 1
-    for part in chunked(ids):
-        client.delete(f"playlist/{args.playlist}/tracks", songs=",".join(part))
+    owned(gw, args.playlist, "remove from")
+    gw.call("playlist.deleteSongs", PLAYLIST_ID=int(args.playlist),
+            songs=songs_payload(ids))
     print(f"removed {len(ids)} tracks from {args.playlist}")
     return 0
 
 
-def cmd_rename(client, args):
-    client.post(f"playlist/{args.playlist}", title=args.title)
+def update(gw, pid, **fields):
+    """playlist.update replaces the header, so send what is not changing."""
+    data = owned(gw, pid, "edit")
+    payload = {"PLAYLIST_ID": int(pid),
+               "title": data.get("TITLE") or "",
+               "description": data.get("DESCRIPTION") or "",
+               "status": int(data.get("STATUS") or STATUS_PRIVATE)}
+    payload.update(fields)
+    gw.call("playlist.update", **payload)
+    return data
+
+
+def cmd_rename(gw, args):
+    update(gw, args.playlist, title=args.title)
     print(f"playlist {args.playlist} is now {args.title!r}")
     return 0
 
 
-def cmd_describe(client, args):
-    client.post(f"playlist/{args.playlist}", description=args.text)
+def cmd_describe(gw, args):
+    update(gw, args.playlist, description=args.text)
     print(f"described playlist {args.playlist}")
     return 0
 
 
-def cmd_delete(client, args):
-    head = playlist(client, args.playlist)
+def cmd_delete(gw, args):
+    data = owned(gw, args.playlist, "delete")
     if not args.yes:
-        print(f"would delete {args.playlist}: {head.get('title')} "
-              f"({head.get('nb_tracks')} tracks) — pass --yes")
+        print(f"would delete {args.playlist}: {data.get('TITLE')} "
+              f"({data.get('NB_SONG')} tracks) — pass --yes")
         return 0
-    client.delete(f"playlist/{args.playlist}")
-    print(f"deleted {args.playlist}: {head.get('title')}")
+    gw.call("playlist.delete", PLAYLIST_ID=int(args.playlist))
+    print(f"deleted {args.playlist}: {data.get('TITLE')}")
     return 0
 
 
-def cmd_dedupe(client, args):
-    rows = tracks(client, args.playlist)
-    seen, exact, loose = {}, [], []
-    for pos, t in enumerate(rows):
-        tid = str(t["id"])
-        if tid in seen:
-            exact.append((tid, t))
-        else:
-            seen[tid] = pos
-    if args.loose:
-        by_song = {}
-        for t in rows:
-            song = key(t)
-            if not any(song):
-                continue
-            if song in by_song and str(t["id"]) != str(by_song[song]["id"]):
-                loose.append((t, by_song[song]))
-            else:
-                by_song.setdefault(song, t)
+def better(a, b):
+    """Which of two copies of one recording to keep."""
+    for field in ("readable", "lossless"):
+        if a.get(field) != b.get(field):
+            return a if a.get(field) else b
+    return a                                    # tie: the earlier one wins
 
-    doomed = {tid for tid, _ in exact}
-    for t, kept in loose:
-        doomed.add(str(t["id"]))
-    if not exact and not loose:
+
+def cmd_dedupe(gw, args):
+    rows = tracks(gw, args.playlist)
+    groups = {}
+    for track in rows:
+        for k in ([key(track)] + ([song_key(track)] if args.loose else [])):
+            if k[0] == "song" and not any(k[1:]):
+                continue
+            groups.setdefault(k, []).append(track)
+
+    doomed, plan = {}, []
+    for k, members in groups.items():
+        unique = {t["id"]: t for t in members}
+        if len(unique) < 2:
+            continue
+        keep = None
+        for track in unique.values():
+            keep = track if keep is None else better(keep, track)
+        for track in unique.values():
+            if track["id"] != keep["id"] and track["id"] not in doomed:
+                doomed[track["id"]] = (track, keep, k[0])
+    for track, keep, how in doomed.values():
+        plan.append(f"  {how:4} drop {track['id']}\t{track['artist']} — "
+                    f"{track['title']}"
+                    f"{'' if track['readable'] else ' [unplayable]'}"
+                    f"{'' if track['lossless'] else ' [no flac]'}\n"
+                    f"       keep {keep['id']}\t{keep['album']}")
+    if not doomed:
         print("no duplicates")
         return 0
-    for tid, t in exact:
-        print(f"exact  {tid}\t{t.get('title')} — "
-              f"{(t.get('artist') or {}).get('name')}")
-    for t, kept in loose:
-        print(f"loose  {t['id']}\t{t.get('title')} — "
-              f"{(t.get('artist') or {}).get('name')}  "
-              f"(keeping {kept['id']} "
-              f"{(kept.get('album') or {}).get('title', '')})")
+    print("\n".join(plan))
     if not args.apply:
-        print(f"\nwould drop {len(exact)} exact and {len(loose)} loose "
-              f"duplicates — pass --apply")
+        print(f"\nwould drop {len(doomed)} duplicates of "
+              f"{len(rows)} tracks — pass --apply")
         return 0
-
-    for part in chunked(sorted(doomed)):
-        client.delete(f"playlist/{args.playlist}/tracks", songs=",".join(part))
-    # An exact duplicate loses every copy above, so put one copy back.
-    back = sorted({tid for tid, _ in exact})
-    for part in chunked(back):
-        client.post(f"playlist/{args.playlist}/tracks", songs=",".join(part))
-    print(f"dropped {len(exact)} exact and {len(loose)} loose duplicates"
-          + (f"; {len(back)} tracks moved to the end" if back else ""))
+    owned(gw, args.playlist, "dedupe")
+    gw.call("playlist.deleteSongs", PLAYLIST_ID=int(args.playlist),
+            songs=songs_payload(doomed))
+    print(f"dropped {len(doomed)} duplicates")
     return 0
 
 
-def cmd_merge(client, args):
-    target = playlist(client, args.into)
-    have = {str(t["id"]) for t in tracks(client, args.into)}
+def cmd_merge(gw, args):
+    target = head(gw, args.into)
+    have = {t["id"] for t in tracks(gw, args.into)}
     incoming, sources = [], []
     for pid in args.sources:
-        head = playlist(client, pid)
-        rows = tracks(client, pid)
-        sources.append((pid, head.get("title"), len(rows)))
+        data = head(gw, pid)
+        rows = tracks(gw, pid)
+        sources.append((pid, data.get("TITLE"), len(rows),
+                        str(data.get("PARENT_USER_ID")) == str(gw.user_id)))
         for t in rows:
-            tid = str(t["id"])
-            if tid not in have:
-                have.add(tid)
-                incoming.append(tid)
-    for pid, title, count in sources:
-        print(f"source {pid}: {title} ({count} tracks)")
-    print(f"target {args.into}: {target.get('title')} "
-          f"({target.get('nb_tracks')} tracks)")
+            if t["id"] not in have:
+                have.add(t["id"])
+                incoming.append(t["id"])
+    for pid, title, count, mine in sources:
+        print(f"source {pid}: {title} ({count} tracks)"
+              f"{'' if mine else '  [not yours — cannot be deleted]'}")
+    print(f"target {args.into}: {target.get('TITLE')} "
+          f"({target.get('NB_SONG')} tracks)")
     print(f"{len(incoming)} tracks are new to the target")
     if not args.apply:
         print("pass --apply to merge")
         return 0
-    for part in chunked(incoming):
-        client.post(f"playlist/{args.into}/tracks", songs=",".join(part))
+    owned(gw, args.into, "merge into")
+    if incoming:
+        gw.call("playlist.addSongs", PLAYLIST_ID=int(args.into),
+                songs=songs_payload(incoming), offset=-1)
     print(f"merged {len(incoming)} tracks into {args.into}")
     if args.drop_sources:
-        for pid, title, _ in sources:
-            client.delete(f"playlist/{pid}")
+        for pid, title, _, mine in sources:
+            if not mine:
+                print(f"kept {pid}: {title} — not yours to delete")
+                continue
+            gw.call("playlist.delete", PLAYLIST_ID=int(pid))
             print(f"deleted source {pid}: {title}")
     return 0
 
 
 SORTS = {
-    "artist": lambda t: (norm((t.get("artist") or {}).get("name")),
-                         norm((t.get("album") or {}).get("title")),
-                         norm(t.get("title"))),
-    "album": lambda t: (norm((t.get("album") or {}).get("title")),
-                        norm(t.get("title"))),
-    "title": lambda t: norm(t.get("title")),
-    "duration": lambda t: t.get("duration") or 0,
+    "artist": lambda t: (norm(t["artist"]), norm(t["album"]), norm(t["title"])),
+    "album": lambda t: (norm(t["album"]), norm(t["title"])),
+    "title": lambda t: norm(t["title"]),
+    "duration": lambda t: t["duration"] or 0,
+    "added": lambda t: str(t.get("time_add") or ""),
 }
 
 
-def cmd_sort(client, args):
-    rows = tracks(client, args.playlist)
-    if len(rows) > ORDER_MAX:
-        sys.exit(f"{len(rows)} tracks is past the {ORDER_MAX} that fit in one "
-                 f"order request — split the playlist first")
+def cmd_sort(gw, args):
+    rows = tracks(gw, args.playlist)
     order = sorted(rows, key=SORTS[args.by])
     if [t["id"] for t in order] == [t["id"] for t in rows]:
         print(f"already sorted by {args.by}")
         return 0
     for t in order[:12]:
-        print(f"{t['id']}\t{(t.get('artist') or {}).get('name')} — "
-              f"{t.get('title')}")
+        print(f"{t['id']}\t{t['artist']} — {t['title']}")
     if len(order) > 12:
         print(f"... and {len(order) - 12} more")
     if not args.apply:
         print(f"\nwould reorder {len(order)} tracks by {args.by} — pass --apply")
         return 0
-    client.post(f"playlist/{args.playlist}/tracks",
-                order=",".join(str(t["id"]) for t in order))
+    owned(gw, args.playlist, "reorder")
+    gw.call("playlist.updateOrder", PLAYLIST_ID=int(args.playlist),
+            order=[str(t["id"]) for t in order])
     print(f"reordered {len(order)} tracks by {args.by}")
     return 0
 
@@ -343,7 +360,8 @@ def main():
     sp = sub.add_parser("create")
     sp.add_argument("title")
     sp.add_argument("--description")
-    sp.add_argument("--private", action="store_true")
+    sp.add_argument("--public", action="store_true",
+                    help="visible to everyone; the default is private")
 
     for name in ("add", "rm"):
         sp = sub.add_parser(name)
@@ -365,7 +383,7 @@ def main():
     sp = sub.add_parser("dedupe")
     sp.add_argument("playlist")
     sp.add_argument("--loose", action="store_true",
-                    help="also drop the same song under a different id")
+                    help="also match on artist and title, not only ISRC")
     sp.add_argument("--apply", action="store_true")
 
     sp = sub.add_parser("merge")
@@ -380,10 +398,9 @@ def main():
     sp.add_argument("--apply", action="store_true")
 
     args = p.parse_args()
-    client = Deezer()
     try:
-        return globals()[f"cmd_{args.cmd}"](client, args)
-    except DeezerError as e:
+        return globals()[f"cmd_{args.cmd}"](Gw(), args)
+    except GwError as e:
         print(f"deezer: {e}", file=sys.stderr)
         return 1
 

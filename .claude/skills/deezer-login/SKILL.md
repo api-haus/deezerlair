@@ -1,104 +1,85 @@
 ---
 name: deezer-login
-description: Connect this repo to a Deezer account, or repair a broken connection. Use when a script reports no access token or an OAuth error, when `dz_login.py --check` fails, or when the user asks to log in, re-authorise, switch account, or grant more permissions.
+description: Connect this repo to a Deezer account, or repair a broken connection. Use when a script reports no session, when `dz_login.py --check` fails, when writes stop working, or when the user asks to log in, re-authorise or switch account.
 ---
 
 # /deezer-login — connect the account
 
-The Deezer login needs a browser and a human. You cannot do it alone. Your job
-is to prepare each step, hand the user exactly one thing to do, and take the
-answer back.
+There is no OAuth here, and do not try to build one. Deezer has closed new API
+application registration, so the documented flow cannot be started by anyone
+who does not already own an application. The website and the desktop player
+authenticate with a single cookie called `arl`, and so does this repo.
 
-## First, find out what is actually missing
+Usually there is nothing to paste. The Deezer desktop player stores its
+cookies unencrypted, so **signing in to the player is the login**, and the
+scripts read the cookie out of it. Firefox works the same way.
+
+## Step 1 — see what is there
 
 ```bash
 python3 scripts/dz_login.py --check
 ```
 
-- It prints a name and a permission list — the account is connected. Say so
-  and stop. Re-run the flow only if the user wants a different account, or if
-  `manage_library` or `delete_library` is absent from the list.
-- It says no token is stored — go to step 1.
-- It says the token is not usable — the token was revoked or the account
-  changed its password. Go to step 2; the application registration survives.
+- It names an account and an audio quality — the connection works. Say so and
+  stop, unless the user wants a different account.
+- It says there is no session, or the session is dead — go to step 2.
 
-## Step 1 — the application (once per machine)
-
-Read `.env` if it exists. If `DEEZER_APP_ID`, `DEEZER_APP_SECRET` and
-`DEEZER_REDIRECT_URI` are all filled in, skip to step 2.
-
-Otherwise the user has to register an application. Ask them to open
-<https://developers.deezer.com/myapps>, press **Create a new Application**,
-and fill the form. Tell them these values, and that the redirect URL must
-match to the character:
-
-- Application name: `deezerlair` (any name works)
-- Application domain: `localhost`
-- Redirect URL after authentication: `http://localhost:8080/deezerlair`
-
-Deezer allows one redirect URL per application, so it cannot be changed later
-without editing both places. When they come back with the Application ID and
-the Secret Key, write `.env` from `.env.example` yourself:
+## Step 2 — connect
 
 ```bash
-cp .env.example .env && chmod 600 .env
+python3 scripts/dz_login.py
 ```
 
-Then put the two values in. Never print the secret back to the chat.
+This searches every cookie store it knows, verifies the first live `arl` it
+finds, and stores it. If it succeeds, confirm the account name back to the
+user and go to step 4.
 
-## Step 2 — the login link
+If it finds nothing, run `python3 scripts/dz_login.py --where` to show which
+stores were searched, then pick the case that applies:
+
+- **The player is installed but not signed in.** Ask the user to open the
+  Deezer desktop player and sign in, then run step 2 again.
+- **The player is not installed, but the user has Firefox.** Ask them to sign
+  in to deezer.com in Firefox, then run step 2 again.
+- **The user only has Chrome, Brave, Edge or another Chromium browser.** Those
+  encrypt their cookie store, so the cookie has to come across by hand — go to
+  step 3.
+
+## Step 3 — paste the cookie by hand
+
+Ask the user to do this on deezer.com while signed in, in their own words:
+
+> Press F12, open **Application** (Chrome) or **Storage** (Firefox), expand
+> **Cookies**, choose `https://www.deezer.com`, find the row named **arl**,
+> and copy its value. It is a long line of about 192 hexadecimal characters.
+
+Then:
 
 ```bash
-python3 scripts/dz_login.py --url
+python3 scripts/dz_login.py --arl '<the value they pasted>'
 ```
 
-Give the user that URL and this instruction, in your own words:
+**The `arl` is the entire account.** It plays, it downloads, and it edits the
+library. Never echo it back into the conversation, never write it into a file
+other than `state/session.json`, and never put it in a commit. If the user
+pastes it in chat, tell them plainly that they should rotate it later by
+signing out of Deezer everywhere, and carry on.
 
-> Open the link, press **Allow**, and the browser will land on a page that
-> fails to load. That failure is expected — nothing is listening on that
-> address. Copy the whole address out of the address bar and paste it back
-> here.
-
-The page fails because the redirect points at a local port that no server is
-holding. The part that matters is the `code=…` parameter in the address.
-
-## Step 3 — take the code back
-
-```bash
-python3 scripts/dz_login.py --code '<the address they pasted>'
-```
-
-Quote the argument — the address contains `&`. The script accepts the full
-address, a bare query string, or the code on its own.
-
-The code expires in a few minutes and works once. If the exchange fails, go
-back to step 2 and produce a fresh link rather than reusing the old one.
-
-On success it prints the account name, the granted permissions, and the path
-of the token file. Repeat that to the user, without the token itself.
-
-## When the user runs their own terminal
-
-If the user says they are at the keyboard and would rather do it themselves,
-one command covers steps 2 and 3:
-
-```bash
-python3 scripts/dz_login.py --serve
-```
-
-It opens the browser, catches the redirect on `localhost:8080`, and stores the
-token. Do not run this yourself — it blocks until a browser answers, and the
-browser it opens may not be on the user's screen.
-
-## Afterwards
-
-Confirm the connection and leave the account ready to work with:
+## Step 4 — leave the account ready
 
 ```bash
 python3 scripts/dz_login.py --check
 python3 scripts/dz_pull.py --snapshot
 ```
 
-If `manage_library` or `delete_library` is missing from the permission list,
-the write scripts will fail. That means a permission was declined on the
-consent page. Go back to step 2 and tell the user to accept all of them.
+The pull fills `cache/library.json` and writes the first restore point, which
+every destructive command later depends on.
+
+## When it breaks later
+
+An `arl` rotates when the user signs out everywhere or changes their password.
+The symptom is a script saying the session is not logged in.
+
+The repair is always the same: have the user sign in to the Deezer player
+again, then run `python3 scripts/dz_login.py` to pick up the fresh cookie.
+`--forget` drops the stored one first if you want a clean start.

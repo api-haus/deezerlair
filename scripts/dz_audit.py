@@ -7,9 +7,10 @@
 
 Checks:
     summary     size of the library, and how much of it repeats
-    duplicates  the same track, or the same song, twice in one playlist
+    duplicates  one recording twice in a playlist, under two different ids
     overlap     playlist pairs where one nearly contains the other
     dead        tracks this account can no longer play
+    lossy       playable tracks that have no FLAC
     thin        empty and near-empty playlists
     twins       playlists whose titles say they are the same list
     artists     who dominates the library
@@ -32,8 +33,8 @@ from dz_pull import load
 THIN = 5            # a playlist this small is probably an accident
 OVERLAP = 0.8       # containment above this means "one is inside the other"
 OVERLAP_MIN = 3     # below this, containment is coincidence, not a copy
-CHECKS = ("summary", "duplicates", "overlap", "dead", "thin", "twins",
-          "artists")
+CHECKS = ("summary", "duplicates", "overlap", "dead", "lossy", "thin",
+          "twins", "artists")
 
 
 def song(track):
@@ -64,23 +65,49 @@ def check_summary(library, out):
 
 
 def check_duplicates(library, out):
+    # Deezer refuses to hold one track id twice in a playlist, so every
+    # duplicate is two different ids. Matching ISRCs are the same recording
+    # and safe to collapse; matching artist and title need a human glance.
     found = []
     for p in mine(library):
-        ids = Counter(t["id"] for t in p["tracks"])
-        exact = sum(n - 1 for n in ids.values() if n > 1)
+        by_isrc = Counter(t["isrc"] for t in p["tracks"] if t.get("isrc"))
+        certain = sum(n - 1 for n in by_isrc.values() if n > 1)
         by_song = Counter(song(t) for t in p["tracks"] if any(song(t)))
-        loose = sum(n - 1 for n in by_song.values() if n > 1) - exact
-        if exact or loose > 0:
+        likely = max(sum(n - 1 for n in by_song.values() if n > 1) - certain, 0)
+        if certain or likely:
             found.append({"id": p["id"], "title": p["title"],
-                          "exact": exact, "loose": max(loose, 0)})
-    found.sort(key=lambda f: f["exact"] + f["loose"], reverse=True)
+                          "isrc": certain, "song": likely})
+    found.sort(key=lambda f: f["isrc"] + f["song"], reverse=True)
     if found:
         out.append("## duplicates")
         for f in found:
             out.append(f"  {f['id']}  {f['title'][:44]:<44} "
-                       f"{f['exact']} exact, {f['loose']} loose")
+                       f"{f['isrc']} same-recording, {f['song']} same-song")
+            flag = " --loose" if f["song"] else ""
             out.append(f"      python3 scripts/dz_playlist.py dedupe "
-                       f"{f['id']} --loose --apply")
+                       f"{f['id']}{flag} --apply")
+    return found
+
+
+def check_lossy(library, out):
+    """Tracks with no FLAC — the reason for being on Deezer in the first place."""
+    found = []
+    for p in mine(library):
+        lossy = [t for t in p["tracks"]
+                 if t.get("lossless") is False and t.get("readable", True)]
+        if lossy:
+            found.append({"id": p["id"], "title": p["title"],
+                          "lossy": len(lossy), "size": len(p["tracks"])})
+    found.sort(key=lambda f: f["lossy"] / max(f["size"], 1), reverse=True)
+    total = sum(f["lossy"] for f in found)
+    if found:
+        out.append(f"## lossy — {total} playable tracks have no FLAC")
+        for f in found[:15]:
+            share = int(100 * f["lossy"] / max(f["size"], 1))
+            out.append(f"  {f['id']}  {f['title'][:44]:<44} "
+                       f"{f['lossy']}/{f['size']} ({share}%)")
+        if len(found) > 15:
+            out.append(f"  ... and {len(found) - 15} more playlists")
     return found
 
 

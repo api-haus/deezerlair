@@ -23,78 +23,61 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dz import ROOT, Deezer, DeezerError
+from dz_gw import Gw, GwError, as_playlist, as_track
 
+ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / "cache" / "library.json"
 SNAPSHOTS = ROOT / "snapshots"
 
 
-def slim_track(row):
-    """Keep the fields the housekeeping scripts actually read."""
-    return {"id": row.get("id"),
-            "title": row.get("title"),
-            "artist": (row.get("artist") or {}).get("name"),
-            "artist_id": (row.get("artist") or {}).get("id"),
-            "album": (row.get("album") or {}).get("title"),
-            "album_id": (row.get("album") or {}).get("id"),
-            "duration": row.get("duration"),
-            "readable": row.get("readable", True),
-            "time_add": row.get("time_add")}
-
-
-def pull(client, with_tracks=True):
+def pull(gw, with_tracks=True):
     """Walk the account and return one dictionary describing all of it."""
-    profile = client.me()
-    me = profile.get("id")
-    print(f"pulling {profile.get('name')} (id {me})", file=sys.stderr)
+    me = gw.user_id
+    print(f"pulling {gw.name} (id {me})", file=sys.stderr)
 
-    playlists = []
-    for row in client.paginate("user/me/playlists"):
-        entry = {"id": row.get("id"),
-                 "title": row.get("title"),
-                 "nb_tracks": row.get("nb_tracks"),
-                 "public": row.get("public"),
-                 "collaborative": row.get("collaborative"),
-                 "is_loved_track": row.get("is_loved_track", False),
-                 "creation_date": row.get("creation_date"),
-                 "link": row.get("link"),
-                 "creator_id": (row.get("creator") or {}).get("id"),
-                 "creator": (row.get("creator") or {}).get("name"),
-                 "mine": (row.get("creator") or {}).get("id") == me,
-                 "tracks": []}
-        playlists.append(entry)
-    print(f"{len(playlists)} playlists", file=sys.stderr)
+    playlists = [as_playlist(row, me) for row in gw.profile_tab("playlists")]
+    print(f"{len(playlists)} playlists "
+          f"({sum(1 for p in playlists if p['mine'])} owned)", file=sys.stderr)
 
     if with_tracks:
         for n, entry in enumerate(playlists, 1):
             print(f"  [{n}/{len(playlists)}] {entry['title']} "
                   f"({entry['nb_tracks']})", file=sys.stderr)
             try:
-                rows = client.paginate(f"playlist/{entry['id']}/tracks")
-            except DeezerError as e:
+                rows = gw.paginate("playlist.getSongs",
+                                   PLAYLIST_ID=entry["id"])
+            except GwError as e:
                 print(f"    skipped: {e}", file=sys.stderr)
                 entry["error"] = str(e)
                 continue
-            entry["tracks"] = [slim_track(r) for r in rows]
+            entry["tracks"] = [as_track(r) for r in rows]
 
-    favorites = {}
-    for kind in ("tracks", "albums", "artists"):
+    # The favourite tracks are a playlist, so they are already above when the
+    # loved list belongs to this account. Pull them by id to be certain.
+    favorites = {"tracks": [], "albums": [], "artists": []}
+    try:
+        favorites["tracks"] = [as_track(r) for r in gw.paginate(
+            "playlist.getSongs", PLAYLIST_ID=gw.loved_playlist_id)]
+    except GwError as e:
+        print(f"favourite tracks: {e}", file=sys.stderr)
+    for kind, tab, id_key, title_key in (
+            ("albums", "albums", "ALB_ID", "ALB_TITLE"),
+            ("artists", "artists", "ART_ID", "ART_NAME")):
         try:
-            rows = client.paginate(f"user/me/{kind}")
-        except DeezerError as e:
-            print(f"favorite {kind}: {e}", file=sys.stderr)
-            rows = []
-        favorites[kind] = ([slim_track(r) for r in rows] if kind == "tracks"
-                           else [{"id": r.get("id"),
-                                  "title": r.get("title") or r.get("name"),
-                                  "artist": (r.get("artist") or {}).get("name"),
-                                  "nb_tracks": r.get("nb_tracks")}
-                                 for r in rows])
-        print(f"favorite {kind}: {len(favorites[kind])}", file=sys.stderr)
+            favorites[kind] = [{"id": row.get(id_key),
+                                "title": row.get(title_key),
+                                "artist": row.get("ART_NAME"),
+                                "nb_tracks": row.get("NUMBER_TRACK")}
+                               for row in gw.profile_tab(tab)]
+        except GwError as e:
+            print(f"favourite {kind}: {e}", file=sys.stderr)
+    for kind in favorites:
+        print(f"favourite {kind}: {len(favorites[kind])}", file=sys.stderr)
 
     return {"pulled": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "profile": {k: profile.get(k)
-                        for k in ("id", "name", "country", "link")},
+            "profile": {"id": me, "name": gw.name,
+                        "country": gw.user.get("RECOMMENDATION_COUNTRY"),
+                        "loved_playlist_id": gw.loved_playlist_id},
             "playlists": playlists,
             "favorites": favorites}
 
@@ -135,8 +118,8 @@ def main():
         return print_ids(load(args.source), args.ids)
 
     try:
-        library = pull(Deezer(), with_tracks=not args.no_tracks)
-    except DeezerError as e:
+        library = pull(Gw(), with_tracks=not args.no_tracks)
+    except GwError as e:
         print(f"deezer: {e}", file=sys.stderr)
         return 1
 
@@ -146,7 +129,7 @@ def main():
     total = sum(len(e["tracks"]) for e in library["playlists"])
     print(f"wrote {out} — {len(library['playlists'])} playlists, "
           f"{total} playlist tracks, "
-          f"{len(library['favorites']['tracks'])} favorite tracks")
+          f"{len(library['favorites']['tracks'])} favourite tracks")
 
     if args.snapshot:
         SNAPSHOTS.mkdir(parents=True, exist_ok=True)

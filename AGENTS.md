@@ -20,16 +20,33 @@ settings. If `PREFS.md` is missing, copy `PREFS.example.md` to it first.
 Write to `PREFS.md` only on an explicit instruction. It is not a place to
 record what the user listens to or to log inferences about their taste.
 
+## Two APIs, and which one to use
+
+Deezer has a public API and a private one, and this repo uses both.
+
+- **`api.deezer.com`** — public, no session, clean JSON. Search, catalogue
+  lookups, charts, editorial, related artists. `dz.py` and `dz_find.py` speak
+  it. Its *write* endpoints need an OAuth token, and **Deezer has closed new
+  API application registration**, so that half is unreachable. Do not try to
+  build the OAuth flow; it cannot be completed.
+- **gw-light** — the gateway the Deezer website itself uses, authenticated by
+  the `arl` cookie. Everything about the account, and every write, happens
+  here. `dz_gw.py` speaks it, and `dz.py --gw <method>` reaches it directly.
+
+Ids are the same in both, so a track found through search can be written
+through the gateway without translation.
+
 ## Start of a session
 
-Check that the token is alive before anything else:
+Check that the session is alive before anything else:
 
 ```bash
 python3 scripts/dz_login.py --check
 ```
 
-If it reports no token or a dead token, run the `/deezer-login` skill. Do not
-try to log in by hand — the flow needs the human to open a browser.
+If it reports no session or a dead one, run the `/deezer-login` skill. The
+usual repair is for the user to sign in to the Deezer desktop player again —
+the scripts read the cookie straight out of it.
 
 Then, for any question about the shape of the library, refresh the cache once
 and read that instead of the API:
@@ -67,21 +84,31 @@ defaults to a dry run for this reason.
 
 | Script | What it does |
 | --- | --- |
-| `dz.py` | Any API call at all. Everything else imports it. |
-| `dz_login.py` | The OAuth flow, and `--check` to test the token. |
+| `dz.py` | The public API, plus `--gw` for any gateway method. |
+| `dz_gw.py` | The authenticated transport. Everything writing imports it. |
+| `dz_login.py` | Finds the `arl`, verifies it, stores it. `--check` tests it. |
 | `dz_find.py` | Free text or an ISRC to an id, with a confidence. |
 | `dz_pull.py` | The whole library into `cache/library.json` and snapshots. |
-| `dz_audit.py` | Finds duplicates, overlaps, dead tracks and twin playlists. |
+| `dz_audit.py` | Duplicates, overlaps, dead and lossy tracks, twin playlists. |
 | `dz_playlist.py` | Create, fill, rename, dedupe, merge, sort, delete. |
 | `dz_fav.py` | Favourite tracks, albums and artists. |
 
-`dz.py` reaches anything the other scripts do not cover:
+`dz.py` reaches anything the other scripts do not cover, on either API:
 
 ```bash
-python3 scripts/dz.py user/me/history --fields title,artist.name --max 50
 python3 scripts/dz.py artist/27/related --fields id,name
-python3 scripts/dz.py -X POST playlist/12345/tracks songs=3135556,916424
+python3 scripts/dz.py chart/0/tracks limit=20 --fields title,artist.name
+python3 scripts/dz.py --gw deezer.pageProfile USER_ID=<id> tab=albums nb=5
+python3 scripts/dz.py --gw playlist.getSongs PLAYLIST_ID=<id> nb=10 start=0
 ```
+
+Gateway methods worth knowing, all verified against a live account:
+`deezer.getUserData`, `deezer.pageProfile` (tabs `playlists`, `albums`,
+`artists`), `deezer.pagePlaylist`, `playlist.getSongs`, `playlist.create`,
+`playlist.addSongs`, `playlist.deleteSongs`, `playlist.update`,
+`playlist.updateOrder`, `playlist.delete`, `favorite_song.add` / `.remove`,
+`album.addFavorite` / `.deleteFavorite`, `artist.addFavorite` /
+`.deleteFavorite`, `playlist.addFavorite` / `.deleteFavorite`.
 
 ## Keep the output small
 
@@ -162,57 +189,68 @@ a stored profile of the user's taste.
 - **Never edit a playlist the account does not own.** `dz_playlist.py list`
   marks them in the `mine` column, and `dz_audit.py` ignores them. A followed
   playlist belongs to somebody else, and the API will refuse the write anyway.
-- **The favourite tracks and the "Loved Tracks" playlist are one list.** Use
-  `dz_fav.py` for it. Adding tracks to it through `dz_playlist.py` treats it
-  as an ordinary playlist and confuses the two views of the same data.
-- **Deleting a track from a playlist deletes every copy of it.** The API takes
-  track ids, not positions, so one copy of a duplicate cannot be singled out.
-  `dz_playlist.py dedupe` handles this by deleting the id and adding it back
-  once; the surviving copy lands at the end of the playlist. Accept that, or
-  do not dedupe that playlist.
+- **The favourite tracks and the "Loved Tracks" playlist are one list.** Its
+  id is on the session (`gw.loved_playlist_id`). Use `dz_fav.py` for it.
+- **A duplicate is never the same id twice.** Deezer refuses to hold one track
+  id twice in a playlist, so duplicates are always two different ids for one
+  recording. Matching ISRCs prove it is the same recording and are safe to
+  collapse; matching artist and title (`--loose`) also catch re-recordings and
+  covers, so show that plan before applying it.
 - **`playlist delete` is final.** Deezer keeps no trash. It needs `--yes`, and
   it needs a snapshot taken first.
-- **Never print or commit the access token.** It lives in `state/token.json`
-  (mode 600) and `.env`, both ignored by git. `dz.py` redacts it from verbose
-  output; keep it that way.
-- **Respect the quota.** Deezer allows 50 calls per 5 seconds per
-  application. `dz.py` paces itself and retries, so use it rather than raw
-  `curl`. A loop of one call per track is fine; a loop that bypasses `dz.py`
-  is not.
+- **Never print or commit the `arl`.** It is the whole account — it plays,
+  downloads and edits. It lives in `state/session.json` (mode 600, ignored by
+  git) or is read live from the desktop player. `dz_gw.py` redacts it; keep it
+  that way, and never paste it into a chat, a commit or a log.
+- **Pace the writes.** Both APIs throttle. `dz.py` and `dz_gw.py` stay under
+  40 calls per 5 seconds and retry, so use them rather than raw `curl`. A loop
+  of one call per track is fine; a loop that bypasses them is not.
 - **Do not add downloading to this repo.** The desktop application does that,
   and keeping this project to the documented API is what keeps it publishable.
 
 ## API notes worth knowing
 
-- A failed call still returns HTTP 200 with an `error` object in the body.
-  Never judge success by the status code. `dz.py` raises on it for you.
-- `readable: false` means the account cannot play that track — usually a
-  licensing gap, and very common in a playlist transferred from another
-  service. Treat those tracks as dead weight; `dz_audit.py` lists them.
-- List endpoints page with `index` and `limit` and carry a `next` link.
-  `dz.py --all` follows it. Never assume the first page is everything.
-- Write parameters go in the query string, not in a body — including for
-  `POST` and `DELETE`. `songs=` takes a comma-separated list, and the scripts
-  send it in batches of 50 so the URL stays inside the server's limit.
-- Reordering sends the whole track list in one `order=` parameter, so it only
-  works for a playlist of a few hundred tracks. `dz_playlist.py sort` refuses
-  above 400 and says so.
+All of the below was checked against a live account, not taken from a
+document. The gateway has no official documentation, so when something here
+disagrees with what you observe, believe what you observe and fix this file.
+
+- **A failed call still returns HTTP 200.** The public API puts an `error`
+  object in the body; the gateway puts one in `error`, and an empty list there
+  means success. Never judge either by the status code.
+- **Playlist `STATUS` is 0 for public and 1 for private** — the opposite way
+  round from what the name suggests. It is verified by asking the public API
+  for the playlist without a token: it serves a public one and refuses a
+  private one. Do not "correct" this constant.
+- **The gateway pages with `nb` and `start`**, and returns `{data, total}`.
+  `Gw.paginate` walks it. The public API pages with `index` and `limit` and a
+  `next` link, which `dz.py --all` follows. Never assume one page is all.
+- **Gateway payloads are JSON in the POST body**, so there is no URL length
+  limit: `playlist.updateOrder` reorders a playlist of any size in one call,
+  and `songs` takes `[[track_id, 0], ...]` however long.
+- **A CSRF token expires before the session does.** `Gw.call` refreshes it and
+  repeats the call when the gateway answers `VALID_TOKEN_REQUIRED`.
+- **`FILESIZE` of 0 means the account cannot play that track** — the gateway
+  has no `readable` field. `FILESIZE_FLAC` of 0 means there is no lossless
+  version. `dz_gw.as_track` turns those into `readable` and `lossless`.
+- **Gateway track rows carry the ISRC**, which identifies a recording exactly
+  across services. It is the best duplicate signal there is, and the right way
+  to match a list exported from another platform. The public API exposes it as
+  `dz.py track/isrc:USUG11600976`.
+- **`VERSION` holds "(Live)", "(Remastered)" and friends**, separate from
+  `SNG_TITLE`. `as_track` appends it, because the recording policy in
+  `PREFS.md` cannot be applied to a title that has been stripped of it.
 - Search accepts fielded queries: `q=artist:"boards of canada" track:"roygbiv"`,
   plus `dur_min`, `dur_max`, `bpm_min`, `bpm_max` and `label`. Add
   `order=RANKING` or a `*_ASC` / `*_DESC` variant to sort the results.
-- An ISRC identifies a recording exactly across services:
-  `dz.py track/isrc:USUG11600976`. When a user brings a list exported from
-  another platform with ISRCs in it, match on those and skip the guessing.
-- `user/me/permissions` reports what the token may do. If a write fails with
-  an OAuth error, check there before debugging anything else.
+- Adding a track that is already in a playlist is a silent no-op, so `add` is
+  safe to repeat.
 
 ## Layout
 
 - `scripts/` — everything above, stdlib only, no install step
 - `PREFS.md` — the user's taste, gitignored, wins over this file
 - `PREFS.example.md` — the tracked template it is copied from
-- `.claude/skills/deezer-login/` — the browser login flow
-- `.env` — application id and secret (mode 600, ignored by git)
-- `state/token.json` — the access token (mode 600, ignored by git)
+- `.claude/skills/deezer-login/` — connecting the account
+- `state/session.json` — the `arl` (mode 600, ignored by git)
 - `cache/library.json` — the last pull, safe to delete and rebuild
 - `snapshots/` — restore points, the undo for everything destructive

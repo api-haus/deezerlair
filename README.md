@@ -23,6 +23,7 @@ application.
 ```bash
 git clone https://github.com/api-haus/deezerlair && cd deezerlair
 cp .env.example .env && chmod 600 .env
+cp PREFS.example.md PREFS.md      # your taste; gitignored, edit freely
 ```
 
 Register an application at <https://developers.deezer.com/myapps>:
@@ -96,18 +97,30 @@ them.
 
 ## Use with an AI agent
 
-`AGENTS.md` is the operating guide — the safety rules, the common workflows,
-and the API behaviour that is worth knowing before writing anything.
-`CONTEXT.md` fixes the vocabulary. Both are written for
-[Claude Code](https://claude.com/claude-code) but any agent that reads a
-repository will get the same value from them.
+A session looks like: *"my library is a mess, what should I fix first"*, or
+*"find me more like the Boards of Canada I already have and put it in a new
+playlist"*.
+
+What makes that work is not the scripts — it is that the policy lives in
+prose, in two files. `AGENTS.md` is the operating manual: the safety rules,
+the common workflows, and the API behaviour worth knowing before writing
+anything. It is the same for everyone. `PREFS.md` is yours — which recording
+wins when several match, how much the agent should ask before acting, how you
+want playlists named and suggestions pitched. It is gitignored, it overrides
+`AGENTS.md` on any conflict, and it is the file the agent edits when you
+change your mind:
+
+- *"never add a live version unless I say live"*
+- *"stop asking before you favourite something I just said I liked"*
+- *"new playlists are private, and no emoji in the names"*
+
+`CONTEXT.md` fixes the vocabulary, so "track", "song" and "loose duplicate"
+mean one thing each. All of it is written for
+[Claude Code](https://claude.com/claude-code), but any agent that reads a
+repository gets the same value from it.
 
 `.claude/skills/deezer-login/` adds a `/deezer-login` command that walks a
 user through the browser flow.
-
-Then a session looks like: *"my library is a mess, what should I fix first"*,
-or *"find me more like the Boards of Canada I already have and put it in a new
-playlist"*.
 
 ## Safety
 

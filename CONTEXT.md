@@ -43,5 +43,10 @@ Below 0.6 the match is a guess and needs a human eye.
 **plan** — what a destructive command prints when it runs without `--apply`:
 the exact changes it would make. Every such command defaults to this.
 
+**preference** — a standing decision of the account owner, kept in `PREFS.md`.
+It is taste, it is personal to one user, and it overrides `AGENTS.md`, which
+is shared doctrine. A preference is written down only when the owner asks for
+it, never inferred.
+
 **quota** — 50 API calls per 5 seconds, per application. `dz.py` paces itself
 below it and retries when Deezer says no.

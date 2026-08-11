@@ -2,6 +2,11 @@
 .env
 state/
 
+# Your preferences — which recording wins, how much to ask, playlist taste.
+# Personal, so it must not collide with an upstream pull. The tracked template
+# is PREFS.example.md.
+PREFS.md
+
 # rebuildable
 cache/
 snapshots/

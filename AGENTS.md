@@ -8,6 +8,18 @@ The owner listens and downloads in the Deezer desktop application. This repo
 never touches audio. It manages the *library* — what is in it, how it is
 named, and how it is organised.
 
+@PREFS.md
+
+The user's standing preferences live in `PREFS.md` — which recording to pick,
+how much to ask before acting, playlist naming and hygiene, how suggestions
+should behave. **It is gitignored and it overrides this file on any
+conflict.** When the user tells you to change a preference, edit `PREFS.md`,
+not this file — this file is shared doctrine and must not pick up one person's
+settings. If `PREFS.md` is missing, copy `PREFS.example.md` to it first.
+
+Write to `PREFS.md` only on an explicit instruction. It is not a place to
+record what the user listens to or to log inferences about their taste.
+
 ## Start of a session
 
 Check that the token is alive before anything else:
@@ -40,8 +52,12 @@ python3 scripts/dz_playlist.py add 12345 --query "Aphex Twin - Xtal"
 
 Only stop and ask when the request is ambiguous about *which* recording, and
 the candidates differ in a way the user would care about — a live version
-against the studio one, an edit against the full length. Confidence below 0.6
-from `dz_find.py` is the signal: show the candidates, let the user pick.
+against the studio one, an edit against the full length. A confidence below
+the floor in `PREFS.md` is the signal: show the candidates, let the user pick.
+
+Which recording wins when several match, and how far "act, don't ask" goes,
+are both set in `PREFS.md`; if it asks for more confirmation than the above,
+follow it.
 
 Removing is the opposite. Take a snapshot first, print the plan, and let the
 plan run only after the user agrees. Every destructive command already
@@ -107,7 +123,8 @@ python3 scripts/dz_playlist.py add <new-id> --resolve wanted.txt
 
 Read the `--batch` output before you write anything. Lines with an empty id
 did not resolve, and lines with a low confidence resolved to the wrong song
-often enough to be worth a look.
+often enough to be worth a look. `PREFS.md` sets where that floor sits and
+what to do with the lines that fall under it.
 
 **Discovery and suggestions**
 
@@ -124,6 +141,10 @@ of `dz_audit.py` names who dominates the library; `artist/<id>/related` and
 `artist/<id>/radio` expand outwards from there. Say why each suggestion
 follows from something the user already keeps.
 
+How many suggestions at a time, how far from the familiar to reach, and what
+to leave alone are in `PREFS.md`. Read the library live for this — never build
+a stored profile of the user's taste.
+
 ## Hard rules
 
 - **Take a snapshot before any bulk write.** `python3 scripts/dz_pull.py
@@ -131,6 +152,13 @@ follows from something the user already keeps.
   back out with `dz_pull.py --ids <playlist> --from snapshots/<file>.json` and
   feed them to `dz_playlist.py add`. Without a snapshot a wrong merge is not
   recoverable.
+- **`dz_find.py` enforces only part of `PREFS.md`.** It scores name similarity
+  and popularity, and it deliberately strips words like "live", "remaster" and
+  "radio edit" before it compares — so a live take or a remaster can tie with
+  the studio original and win on popularity alone. Whatever the script does
+  not enforce, you enforce: read the titles in `--list` output and pick the
+  one the preferences ask for, rather than handing the user a choice they have
+  already made in `PREFS.md`.
 - **Never edit a playlist the account does not own.** `dz_playlist.py list`
   marks them in the `mine` column, and `dz_audit.py` ignores them. A followed
   playlist belongs to somebody else, and the API will refuse the write anyway.
@@ -181,6 +209,8 @@ follows from something the user already keeps.
 ## Layout
 
 - `scripts/` — everything above, stdlib only, no install step
+- `PREFS.md` — the user's taste, gitignored, wins over this file
+- `PREFS.example.md` — the tracked template it is copied from
 - `.claude/skills/deezer-login/` — the browser login flow
 - `.env` — application id and secret (mode 600, ignored by git)
 - `state/token.json` — the access token (mode 600, ignored by git)

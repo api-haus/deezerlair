@@ -14,6 +14,7 @@
     dz_playlist.py dedupe 12345 [--loose] [--apply]
     dz_playlist.py merge 111 222 --into 333 [--apply] [--drop-sources]
     dz_playlist.py sort 12345 --by artist [--apply]
+    dz_playlist.py privacy private --all [--apply]
     dz_playlist.py export 12345                  "Artist - Title" lines
     dz_playlist.py delete 12345 --yes
 
@@ -309,6 +310,67 @@ def cmd_merge(gw, args):
     return 0
 
 
+def cmd_privacy(gw, args):
+    """Make playlists private or public, one header rewrite at a time.
+
+    Idempotent on purpose: it reads the current state every run and touches
+    only what is still wrong, so an interrupted bulk change is resumed simply
+    by running it again.
+    """
+    want_public = args.visibility == "public"
+    rows = [as_playlist(r, gw.user_id) for r in gw.profile_tab("playlists")]
+    if args.all:
+        chosen = [p for p in rows
+                  if p["mine"] and str(p["id"]) != str(gw.loved_playlist_id)]
+    else:
+        wanted = {str(i) for i in args.ids}
+        chosen = [p for p in rows if str(p["id"]) in wanted]
+        missing = wanted - {str(p["id"]) for p in chosen}
+        if missing:
+            sys.exit(f"not your playlists, or not found: {', '.join(missing)}")
+        theirs = [p for p in chosen if not p["mine"]]
+        if theirs:
+            sys.exit("refusing — these belong to someone else: "
+                     + ", ".join(str(p["id"]) for p in theirs))
+    todo = [p for p in chosen if p["public"] != want_public]
+    print(f"{len(chosen)} playlists selected, {len(chosen) - len(todo)} "
+          f"already {args.visibility}, {len(todo)} to change")
+    if not todo:
+        return 0
+    for p in todo[:10]:
+        print(f"  {p['id']}  {p['title'][:50]}")
+    if len(todo) > 10:
+        print(f"  ... and {len(todo) - 10} more")
+    if not args.apply:
+        print(f"\nwould make {len(todo)} playlists {args.visibility} "
+              f"— pass --apply")
+        return 0
+
+    status = STATUS_PUBLIC if want_public else STATUS_PRIVATE
+    done, failed = 0, []
+    for n, p in enumerate(todo, 1):
+        try:
+            # update() re-reads the header first, because playlist.update
+            # replaces it wholesale and would otherwise wipe the description.
+            update(gw, p["id"], status=status)
+            done += 1
+        except (GwError, SystemExit) as e:
+            failed.append((p["id"], p["title"], str(e)))
+            print(f"  [{n}/{len(todo)}] {p['title'][:40]}: FAILED {e}",
+                  file=sys.stderr)
+            continue
+        print(f"  [{n}/{len(todo)}] {p['title'][:50]}", file=sys.stderr)
+    print(f"made {done} playlists {args.visibility}"
+          + (f", {len(failed)} failed" if failed else ""))
+    for pid, title, why in failed:
+        print(f"  failed {pid} {title}: {why}", file=sys.stderr)
+    if failed:
+        print("re-run the same command to retry only what is still wrong",
+              file=sys.stderr)
+        return 1
+    return 0
+
+
 SORTS = {
     "artist": lambda t: (norm(t["artist"]), norm(t["album"]), norm(t["title"])),
     "album": lambda t: (norm(t["album"]), norm(t["title"])),
@@ -395,6 +457,13 @@ def main():
     sp = sub.add_parser("sort")
     sp.add_argument("playlist")
     sp.add_argument("--by", default="artist", choices=sorted(SORTS))
+    sp.add_argument("--apply", action="store_true")
+
+    sp = sub.add_parser("privacy")
+    sp.add_argument("visibility", choices=("private", "public"))
+    sp.add_argument("ids", nargs="*")
+    sp.add_argument("--all", action="store_true",
+                    help="every playlist this account owns")
     sp.add_argument("--apply", action="store_true")
 
     args = p.parse_args()

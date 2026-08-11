@@ -79,6 +79,7 @@ python3 scripts/dz_playlist.py dedupe <id> --apply           # same ISRC
 python3 scripts/dz_playlist.py dedupe <id> --loose --apply   # same artist+title
 python3 scripts/dz_playlist.py sort <id> --by artist --apply
 python3 scripts/dz_playlist.py merge <old> --into <new> --apply --drop-sources
+python3 scripts/dz_playlist.py privacy private --all --apply  # every one of them
 
 # anything else either API can do
 python3 scripts/dz.py artist/27/related --fields id,name
@@ -135,7 +136,14 @@ user through the browser flow.
 - A snapshot before any bulk write, in `snapshots/`, is the undo.
 - Destructive commands are a dry run unless you pass `--apply`.
 - Playlists the account follows but does not own are never written to.
-- The token never leaves the machine and is redacted from verbose output.
+- The `arl` never leaves the machine and is redacted from verbose output.
+- Bulk commands are idempotent: they read the current state and change only
+  what is still wrong, so an interrupted run is resumed by repeating it.
+- Rate limits look after themselves. When Deezer pushes back — an HTTP 429 or
+  503, or a body mentioning a quota — the client waits (honouring
+  `Retry-After`), doubles the gap between every later call, and carries on,
+  earning the speed back after 40 clean calls. Long jobs get slower, not
+  broken. `python3 scripts/selftest.py` exercises that path offline.
 
 ## Notes on the API
 

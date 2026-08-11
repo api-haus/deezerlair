@@ -92,6 +92,7 @@ defaults to a dry run for this reason.
 | `dz_audit.py` | Duplicates, overlaps, dead and lossy tracks, twin playlists. |
 | `dz_playlist.py` | Create, fill, rename, dedupe, merge, sort, delete. |
 | `dz_fav.py` | Favourite tracks, albums and artists. |
+| `selftest.py` | Offline checks of the pure logic. Run it after editing them. |
 
 `dz.py` reaches anything the other scripts do not cover, on either API:
 
@@ -125,6 +126,19 @@ every playlist and every track, it costs no quota, and it is much faster than
 walking the API again.
 
 ## Common work
+
+**Change visibility in bulk**
+
+```bash
+python3 scripts/dz_playlist.py privacy private --all          # plan
+python3 scripts/dz_playlist.py privacy private --all --apply
+python3 scripts/dz_playlist.py privacy public 12345 --apply   # named ones
+```
+
+It reads the current state each run and touches only what is still wrong, so
+an interrupted run is resumed by running it again. It rewrites the whole
+playlist header, and reads each header first for exactly that reason — see the
+hard rule below.
 
 **Clean one playlist**
 
@@ -202,9 +216,19 @@ a stored profile of the user's taste.
   downloads and edits. It lives in `state/session.json` (mode 600, ignored by
   git) or is read live from the desktop player. `dz_gw.py` redacts it; keep it
   that way, and never paste it into a chat, a commit or a log.
-- **Pace the writes.** Both APIs throttle. `dz.py` and `dz_gw.py` stay under
-  40 calls per 5 seconds and retry, so use them rather than raw `curl`. A loop
-  of one call per track is fine; a loop that bypasses them is not.
+- **`playlist.update` replaces the whole header.** Any field you leave out is
+  wiped — omitting `description` empties it, and omitting `title` is rejected
+  outright. Never call it directly: `dz_playlist.update()` reads the current
+  header and sends back what is not changing. This is proven behaviour, not a
+  precaution.
+- **Pace the writes, and let the throttle handle itself.** `dz_gw.py` stays
+  under 40 calls per 5 seconds, and when Deezer pushes back — an HTTP 429 or
+  503, or a body that mentions a quota — it waits (honouring `Retry-After`),
+  doubles the delay between every later call, and carries on, earning the
+  speed back after 40 clean calls. So a long bulk job is safe to start and
+  will simply take longer under pressure. Never bypass it with raw `curl`, and
+  never wrap a script in a retry loop of your own: that fights the pacer
+  instead of helping it. `Gw.throttles` counts how often it happened.
 - **Do not add downloading to this repo.** The desktop application does that,
   and keeping this project to the documented API is what keeps it publishable.
 

@@ -19,6 +19,7 @@ lookups need no session at all and return friendlier JSON.
 import http.cookiejar as cookiejar
 import json
 import os
+import random
 import shutil
 import sqlite3
 import sys
@@ -37,6 +38,48 @@ UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
       "Chrome/120.0.0.0 Safari/537.36")
 WINDOW, BURST, RETRIES = 5.0, 40, 3
 PAGE = 1000
+
+# Deezer publishes no limit for the gateway and reports a breach in more than
+# one shape, so anything that smells like throttling is treated as one: wait,
+# then permanently slow this run down. A bulk job that takes a minute longer
+# is better than one that stops half-finished.
+THROTTLE_RETRIES = 8
+THROTTLE_HINTS = ("quota", "rate limit", "ratelimit", "too many", "throttl",
+                  "flood", "slow down", "temporarily", "try again",
+                  "unavailable", "busy")
+SPACING_FIRST = 0.25        # the delay imposed the first time we are told off
+SPACING_MAX = 8.0
+DECAY_AFTER = 40            # calls that must succeed before speeding up again
+
+
+class Throttled(Exception):
+    """Deezer asked us to slow down. Carries its own advice on how long."""
+
+    def __init__(self, message, retry_after=None):
+        super().__init__(message)
+        self.retry_after = retry_after
+
+
+def looks_throttled(error):
+    """True when a gateway error body is a rate limit wearing a costume."""
+    text = json.dumps(error).lower() if not isinstance(error, str) else error.lower()
+    return any(hint in text for hint in THROTTLE_HINTS)
+
+
+def retry_after_seconds(headers):
+    """Honour Retry-After when the server sends it, in either legal form."""
+    raw = (headers or {}).get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+        return max(0.0, parsedate_to_datetime(raw).timestamp() - time.time())
+    except (TypeError, ValueError):
+        return None
 
 # Cookie stores that hold a live arl, best first. The Deezer desktop player
 # does not encrypt its cookies, and neither does Firefox, so both can be read
@@ -163,6 +206,10 @@ class Gw:
         self.token = "null"
         self._user = None
         self._calls = deque()
+        self.spacing = 0.0          # extra delay between calls, grown on abuse
+        self.throttles = 0          # how often Deezer told us off this run
+        self._since_throttle = 0
+        self._last_call = 0.0
         self._build_opener()
 
     # -- plumbing ---------------------------------------------------------
@@ -179,13 +226,42 @@ class Gw:
         return text.replace(self.arl, "<arl>") if self.arl else text
 
     def _pace(self):
+        """Hold the burst window, plus whatever penalty this run has earned."""
+        gap = time.monotonic() - self._last_call
+        if self.spacing and gap < self.spacing:
+            time.sleep(self.spacing - gap)
         now = time.monotonic()
         while self._calls and now - self._calls[0] > WINDOW:
             self._calls.popleft()
         if len(self._calls) >= BURST:
             time.sleep(WINDOW - (now - self._calls[0]) + 0.05)
             return self._pace()
-        self._calls.append(time.monotonic())
+        self._last_call = time.monotonic()
+        self._calls.append(self._last_call)
+
+    def _back_off(self, why, retry_after=None, attempt=1):
+        """Wait out a throttle, and slow every later call down as well."""
+        self.throttles += 1
+        self._since_throttle = 0
+        self.spacing = min(SPACING_MAX,
+                           max(self.spacing * 2, SPACING_FIRST))
+        wait = retry_after if retry_after is not None else min(
+            60.0, 2 ** attempt + random.uniform(0, 1))
+        print(f"deezer is throttling ({why}); waiting {wait:.1f}s, "
+              f"pacing at {self.spacing:.2f}s between calls from here",
+              file=sys.stderr)
+        time.sleep(wait)
+
+    def _went_well(self):
+        """Earn the speed back slowly once Deezer stops complaining."""
+        if not self.spacing:
+            return
+        self._since_throttle += 1
+        if self._since_throttle >= DECAY_AFTER:
+            self._since_throttle = 0
+            self.spacing = 0.0 if self.spacing <= SPACING_FIRST else self.spacing / 2
+            print(f"deezer settled down; pacing now {self.spacing:.2f}s",
+                  file=sys.stderr)
 
     def _post(self, method, payload):
         url = GW + "?" + urllib.parse.urlencode(
@@ -199,37 +275,64 @@ class Gw:
                      "Origin": "https://www.deezer.com",
                      "Referer": "https://www.deezer.com/"})
         self._pace()
-        with self.opener.open(request, timeout=30) as response:
-            return json.loads(response.read().decode("utf-8", "replace"))
+        try:
+            with self.opener.open(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8", "replace"))
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 503):
+                raise Throttled(f"HTTP {e.code}",
+                                retry_after_seconds(e.headers)) from e
+            raise
 
     def call(self, method, **payload):
         """Call one gateway method and return its `results`.
 
-        A stale CSRF token is refreshed once and the call is repeated, which
-        is what happens when a session outlives its token.
+        Three things are handled here so no caller has to think about them: a
+        stale CSRF token is refreshed and the call repeated, a throttle is
+        waited out and the whole run slowed down, and a dropped connection is
+        retried. Only a real refusal reaches the caller.
         """
         if self.token == "null" and method != "deezer.getUserData":
             self.user                       # opens the session, sets the token
         if self.verbose:
             print(f"gw {method} {json.dumps(payload)[:120]}", file=sys.stderr)
-        last = None
-        for attempt in range(RETRIES):
+        network, throttled, last = 0, 0, None
+        while True:
             try:
                 body = self._post(method, payload)
-            except (urllib.error.URLError, TimeoutError, OSError) as e:
-                last = str(e)
-                time.sleep(2 ** attempt)
+            except Throttled as t:
+                throttled += 1
+                if throttled > THROTTLE_RETRIES:
+                    raise GwError(f"{method}: still throttled after "
+                                  f"{throttled} waits — try again later")
+                self._back_off(f"{method}: {t}", t.retry_after, throttled)
                 continue
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                network += 1
+                last = str(e)
+                if network > RETRIES:
+                    raise GwError(f"{method}: gave up after {network} "
+                                  f"tries: {last}")
+                time.sleep(2 ** network + random.uniform(0, 0.5))
+                continue
+
             error = body.get("error")
             if not error:
+                self._went_well()
                 return body.get("results")
             if isinstance(error, dict) and "VALID_TOKEN_REQUIRED" in error:
                 self._user = None
                 self.token = "null"
                 self.user
                 continue
+            if looks_throttled(error):
+                throttled += 1
+                if throttled > THROTTLE_RETRIES:
+                    raise GwError(f"{method}: still throttled after "
+                                  f"{throttled} waits: {error}")
+                self._back_off(f"{method}: {error}", None, throttled)
+                continue
             raise GwError(f"{method}: {error}")
-        raise GwError(f"{method}: gave up after {RETRIES} tries: {last}")
 
     # -- session ----------------------------------------------------------
 

@@ -47,6 +47,15 @@ Below 0.6 the match is a guess and needs a human eye.
 **plan** — what a destructive command prints when it runs without `--apply`:
 the exact changes it would make. Every such command defaults to this.
 
+**throttle** — Deezer refusing a call because they are arriving too fast. It
+is not a failure and never reaches the caller: `dz_gw.py` waits, widens the
+gap between all later calls, and carries on. A bulk job under throttling gets
+slower, not broken.
+
+**idempotent** — a command that reads the current state and changes only what
+is still wrong, so repeating it is always safe and is how an interrupted run
+is resumed. `privacy` and `add` are built this way.
+
 **preference** — a standing decision of the account owner, kept in `PREFS.md`.
 It is taste, it is personal to one user, and it overrides `AGENTS.md`, which
 is shared doctrine. A preference is written down only when the owner asks for
